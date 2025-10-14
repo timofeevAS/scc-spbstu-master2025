@@ -162,6 +162,9 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
         fprintf(benchmark_log, "\n\n---\n");
     }
 
+    // Start time.
+    clock_t start = clock();
+
     for (size_t it = 0; it < cfg->iters; it++)
     {
         // Save data into benchmark log if it need.
@@ -221,15 +224,23 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
         }
     }
 
+    // Finish time.
+    clock_t end = clock();
+
     if (out_stats)
     {
         out_stats->final_cost = current.cost;        
     }
 
+    double elapsed_time = (double)(end - start) / CLOCKS_PER_SEC;
+
     // Resume data into benchmark log if it need.
     if (benchmark_log)
     {
-        fprintf(benchmark_log, "\n\nBest:        %f\nReal optima: %f\n\n", best.cost, cfg->real_optima);
+        fprintf(benchmark_log, "\n\nBest:        %f\nReal optima: %f\nElapsed:     %f\n\n", 
+                best.cost, 
+                cfg->real_optima,
+                elapsed_time);
     }
 
     // Print results.
@@ -241,6 +252,9 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
     {
         printf("%lu ", best.permutations[i]);
     }
+    printf("\n");
+
+    printf("Elapsed time: %f\n", elapsed_time);
 
     sol_free(&current);
     sol_free(&best);
