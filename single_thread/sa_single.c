@@ -101,6 +101,8 @@ typedef struct
     size_t iters; // iterations number.
     unsigned long long seed;
     int random_start; // 0: identity, 1: shuffling.
+    int benchmark; // 0: no log, 1: log.
+    double real_optima;
 } SAParams;
 
 typedef struct
@@ -138,8 +140,35 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
     double T = cfg->T0;
     const double alpha = cfg->alpha;
 
+    // If benchmark mode write into file benchmark.log
+    FILE *benchmark_log = NULL;
+    if (cfg->benchmark)
+    { 
+        benchmark_log = fopen("benchmark_single_thread.log", "w");
+        if (benchmark_log == NULL)
+        {
+            perror("Cannot open benchmark log file.");
+            return;
+        }
+    }
+
+    // Initial cfg data.
+    if (benchmark_log)
+    {
+        fprintf(benchmark_log, "T0: %f\n", cfg->T0);
+        fprintf(benchmark_log, "alpha: %f\n", cfg->alpha);
+        fprintf(benchmark_log, "Iteration number: %lu\n", cfg->iters);
+        fprintf(benchmark_log, "Seed: %llu\n", cfg->seed);
+        fprintf(benchmark_log, "\n\n---\n");
+    }
+
     for (size_t it = 0; it < cfg->iters; it++)
     {
+        // Save data into benchmark log if it need.
+        if (benchmark_log)
+        {
+            fprintf(benchmark_log, "%lu:    %f\n", it, current.cost);
+        }
         // Choose two random positions.
         size_t i = rng_randint(&rng, current.n);
         size_t j = rng_randint(&rng, current.n);
@@ -195,6 +224,12 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
     if (out_stats)
     {
         out_stats->final_cost = current.cost;        
+    }
+
+    // Resume data into benchmark log if it need.
+    if (benchmark_log)
+    {
+        fprintf(benchmark_log, "\n\nBest:        %f\nReal optima: %f\n\n", best.cost, cfg->real_optima);
     }
 
     // Print results.
