@@ -73,6 +73,7 @@ static void sol_identity(QAPSolution *s)
         s->permutations[i] = i;
     }
 }
+
 static void sol_shuffle(QAPSolution *s, rng_t *r)
 {
     for (size_t i = s->n - (s->n > 0); i > 0; --i)
