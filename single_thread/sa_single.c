@@ -83,6 +83,7 @@ static void sol_shuffle(QAPSolution *s, rng_t *r)
         s->permutations[j] = t;
     }
 }
+
 static void sol_copy(const QAPSolution *src, QAPSolution *dst)
 {
     if (dst->n != src->n)
