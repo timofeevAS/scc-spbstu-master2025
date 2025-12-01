@@ -240,7 +240,7 @@ void *sa_thread_func(void *arg)
     int *stream = init_sprng(DEFAULT_RNG_TYPE,
                              a->thread_id,
                              a->n_threads,
-                             SEED,
+                             time(NULL),
                              SPRNG_DEFAULT);
 
     QAPSolution *cur  = qap_solution_alloc(n);
