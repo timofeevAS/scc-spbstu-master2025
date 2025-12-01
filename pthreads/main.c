@@ -338,15 +338,18 @@ int main(int argc, char **argv)
 {
     if (argc < 2)
     {
-        fprintf(stderr, "Usage: %s instance.dat [nthreads] [iters] [restart] [shake]\n", argv[0]);
+        fprintf(stderr,
+                "Usage: %s instance.dat [nthreads] [iters] [restart] [shake] [repeats]\n",
+                argv[0]);
         return 1;
     }
 
-    const char *path = argv[1];
-    int nthreads = (argc>2?atoi(argv[2]):4);
-    long long iters = (argc>3?atoll(argv[3]):100000);
-    long long restart_period = (argc>4?atoll(argv[4]):20000);
-    int shake_moves = (argc>5?atoi(argv[5]):5);
+    const char *path         = (argc > 1 ? argv[1] : NULL);
+    int nthreads             = (argc > 2 ? atoi(argv[2]) : 4);
+    long long iters          = (argc > 3 ? atoll(argv[3]) : 100000);
+    long long restart_period = (argc > 4 ? atoll(argv[4]) : 20000);
+    int shake_moves          = (argc > 5 ? atoi(argv[5]) : 5);
+    int repeats              = (argc > 6 ? atoi(argv[6]) : 1);
 
     QAPProblem *p = qap_load_from_file(path);
     if (!p)
@@ -355,49 +358,96 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
-    SAThreadArgs *args = malloc(nthreads*sizeof(SAThreadArgs));
+    long long approx_logs = iters / LOG_EVERY_ITER + 10;
 
-    for (int t = 0; t < nthreads; t++)
+    // === массивы для усреднения ===
+    double *best_cost = malloc(approx_logs * sizeof(double));
+    double *sum_time  = calloc(approx_logs, sizeof(double));
+
+    for (long long i = 0; i < approx_logs; i++)
+        best_cost[i] = 1e300;  // очень большое число
+
+    pthread_t *threads;
+    SAThreadArgs *args;
+
+    // === ПОВТОРЫ R раз ===
+    for (int r = 0; r < repeats; r++)
     {
-        args[t].problem = p;
-        args[t].n_iters = iters;
-        args[t].thread_id = t;
-        args[t].n_threads = nthreads;
-        args[t].T0 = 1000.0;
-        args[t].alpha = 0.995;
-        args[t].restart_period = restart_period;
-        args[t].shake_moves = shake_moves;
+        fprintf(stderr, "\n=== REPEAT %d / %d ===\n", r + 1, repeats);
 
-        long long approx_logs = iters / LOG_EVERY_ITER + 10;
+        threads = malloc(nthreads * sizeof(pthread_t));
+        args    = malloc(nthreads * sizeof(SAThreadArgs));
 
-        args[t].trace = malloc(approx_logs * sizeof(double));
-        args[t].timer = malloc(approx_logs * sizeof(double));
-        args[t].trace_len = 0;
+        // обнулить глобальный best между повторами
+        pthread_mutex_lock(&g_best_mutex);
+        if (g_best)
+        {
+            qap_solution_free(g_best);
+            g_best = NULL;
+        }
+        pthread_mutex_unlock(&g_best_mutex);
 
-        pthread_create(&threads[t], NULL, sa_thread_func, &args[t]);
+        // запуск потоков
+        for (int t = 0; t < nthreads; t++)
+        {
+            args[t].problem        = p;
+            args[t].n_iters        = iters;
+            args[t].thread_id      = t;
+            args[t].n_threads      = nthreads;
+            args[t].T0             = 1000.0;
+            args[t].alpha          = 0.995;
+            args[t].restart_period = restart_period;
+            args[t].shake_moves    = shake_moves;
+
+            args[t].trace = malloc(approx_logs * sizeof(double));
+            args[t].timer = malloc(approx_logs * sizeof(double));
+            args[t].trace_len = 0;
+
+            pthread_create(&threads[t], NULL, sa_thread_func, &args[t]);
+        }
+
+        // ждём окончания
+        for (int t = 0; t < nthreads; t++)
+            pthread_join(threads[t], NULL);
+
+        // аккумуляция итогов текущего повтора
+        for (int t = 0; t < nthreads; t++)
+        {
+            for (long long i = 0; i < args[t].trace_len; i++)
+            {
+                // берём МИНИМУМ стоимости (best-so-far)
+                if (args[t].trace[i] < best_cost[i])
+                    best_cost[i] = args[t].trace[i];
+
+                // время усредняем
+                sum_time[i] += args[t].timer[i];
+            }
+
+            free(args[t].trace);
+            free(args[t].timer);
+        }
+
+        free(threads);
+        free(args);
     }
 
-    for (int t = 0; t < nthreads; t++)
-        pthread_join(threads[t], NULL);
+    // === вычисление окончательного усреднённого времени ===
+    double total = (double)(repeats * nthreads);
 
-    for (int t = 0; t < nthreads; t++)
+    FILE *avg = fopen("average_trace.csv", "w");
+    fprintf(avg, "time,best_cost\n");
+
+    for (long long i = 0; i < approx_logs; i++)
     {
-        char fname[64];
-        sprintf(fname, "trace_thread_%d.csv", t);
-
-        FILE *fp = fopen(fname, "w");
-        fprintf(fp, "time,cost\n");
-
-        for (long long i = 0; i < args[t].trace_len; i++)
-            fprintf(fp, "%.6f,%.10f\n", args[t].timer[i], args[t].trace[i]);
-
-        fclose(fp);
-
-        free(args[t].trace);
-        free(args[t].timer);
+        double avg_time = sum_time[i] / total;
+        fprintf(avg, "%.6f,%.10f\n", avg_time, best_cost[i]);
     }
 
+    fclose(avg);
+
+    printf("Saved averaged trace to average_trace.csv\n");
+
+    // вывести лучший последний результат
     if (g_best)
     {
         printf("Best cost = %.10f\n", g_best->cost);
@@ -407,10 +457,11 @@ int main(int argc, char **argv)
         printf("\n");
     }
 
+    free(best_cost);
+    free(sum_time);
+
     qap_free(p);
     if (g_best) qap_solution_free(g_best);
-    free(threads);
-    free(args);
 
     return 0;
 }
