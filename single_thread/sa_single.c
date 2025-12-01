@@ -8,9 +8,8 @@
 
 #define BOTTOM_TEMPERATURE_BOUND 1e-6
 
-// Handy random generator. Xorshift64
-// S. Vigna, "An experimental exploration of Marsaglia’s xorshift generators, scrambled", 
-// ACM Transactions on Mathematical Software (TOMS), 42(4), 2016.
+// ---------------- RNG ----------------
+
 typedef struct
 {
     unsigned long long s;
@@ -20,6 +19,7 @@ static inline void rng_seed(rng_t *r, unsigned long long seed)
 {
     r->s = seed ? seed : 0x9E3779B97F4A7C15ULL;
 }
+
 static inline unsigned long long rng_u64(rng_t *r)
 {
     unsigned long long x = r->s;
@@ -30,34 +30,35 @@ static inline unsigned long long rng_u64(rng_t *r)
     return x * 0x2545F4914F6CDD1DULL;
 }
 
-// Return value from range [0; 1)
 static inline double rng_uniform(rng_t *r)
 {
-    // [0,1)
-    const unsigned long long m = 0x3FF0000000000000ULL | (rng_u64(r) >> 12);
+    const unsigned long long m =
+        0x3FF0000000000000ULL | (rng_u64(r) >> 12);
     double d;
     memcpy(&d, &m, sizeof(d));
     return d - 1.0;
 }
 
-// Return value from range [0; n)
 static inline size_t rng_randint(rng_t *r, size_t n)
 {
-    // [0; n)
     return (size_t)(rng_u64(r) % (n ? n : 1));
 }
+
+// ---------------- Solution helpers ----------------
 
 static void sol_alloc(QAPSolution *s, size_t n)
 {
     s->n = n;
     s->permutations = (size_t *)malloc(n * sizeof(size_t));
     s->cost = 0.0;
+
     if (!s->permutations)
     {
         fprintf(stderr, "alloc perm failed\n");
         exit(1);
     }
 }
+
 static void sol_free(QAPSolution *s)
 {
     free(s->permutations);
@@ -69,9 +70,7 @@ static void sol_free(QAPSolution *s)
 static void sol_identity(QAPSolution *s)
 {
     for (size_t i = 0; i < s->n; i++)
-    {
         s->permutations[i] = i;
-    }
 }
 
 static void sol_shuffle(QAPSolution *s, rng_t *r)
@@ -92,19 +91,24 @@ static void sol_copy(const QAPSolution *src, QAPSolution *dst)
         free(dst->permutations);
         sol_alloc(dst, src->n);
     }
-    memcpy(dst->permutations, src->permutations, src->n * sizeof(size_t));
+
+    memcpy(dst->permutations,
+           src->permutations,
+           src->n * sizeof(size_t));
+
     dst->cost = src->cost;
 }
 
+// ---------------- SA ----------------
+
 typedef struct
 {
-    double T0;    // start tempeture.
-    double alpha; // cooling coefficient.
-    size_t iters; // iterations number.
+    double T0;
+    double alpha;
+    size_t iters;
     unsigned long long seed;
-    int random_start; // 0: identity, 1: shuffling.
-    int benchmark; // 0: no log, 1: log.
-    double real_optima;
+    int random_start;
+    const char *log_path;
 } SAParams;
 
 typedef struct
@@ -114,11 +118,15 @@ typedef struct
     double final_cost;
 } SAStats;
 
-// Single thread `Simulated annealing`.
-void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
+void sa_single_run(
+    const QAPProblem *P,
+    const SAParams *cfg,
+    SAStats *out_stats,
+    FILE *log)
 {
     rng_t rng;
-    rng_seed(&rng, cfg->seed ? cfg->seed : (unsigned long long)time(NULL));
+    rng_seed(&rng,
+             cfg->seed ? cfg->seed : (unsigned long long)time(NULL));
 
     QAPSolution current;
     sol_alloc(&current, P->n);
@@ -142,50 +150,24 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
     double T = cfg->T0;
     const double alpha = cfg->alpha;
 
-    // If benchmark mode write into file benchmark.log
-    FILE *benchmark_log = NULL;
-    if (cfg->benchmark)
-    { 
-        benchmark_log = fopen("benchmark_single_thread.log", "w");
-        if (benchmark_log == NULL)
-        {
-            perror("Cannot open benchmark log file.");
-            return;
-        }
-    }
-
-    // Initial cfg data.
-    if (benchmark_log)
+    if (log)
     {
-        fprintf(benchmark_log, "T0: %f\n", cfg->T0);
-        fprintf(benchmark_log, "alpha: %f\n", cfg->alpha);
-        fprintf(benchmark_log, "Iteration number: %lu\n", cfg->iters);
-        fprintf(benchmark_log, "Seed: %llu\n", cfg->seed);
-        fprintf(benchmark_log, "\n\n---\n");
+        fprintf(log, "# iter current_cost best_cost T\n");
+        fprintf(log, "0 %.10f %.10f %.10f\n",
+                current.cost, best.cost, T);
     }
 
-    // Start time.
     clock_t start = clock();
 
     for (size_t it = 0; it < cfg->iters; it++)
     {
-        // Save data into benchmark log if it need.
-        if (benchmark_log)
-        {
-            fprintf(benchmark_log, "%lu:    %f\n", it, current.cost);
-        }
-        // Choose two random positions.
         size_t i = rng_randint(&rng, current.n);
         size_t j = rng_randint(&rng, current.n);
         if (i == j)
-        {
             continue;
-        }
 
         double delta = qap_delta_swap(P, &current, i, j);
 
-        // Metropolis rule.
-        // https://en.wikipedia.org/wiki/Metropolis–Hastings_algorithm#Formal_derivation
         int accept = 0;
         if (delta < 0.0)
         {
@@ -193,18 +175,16 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
         }
         else
         {
-            // Roulette with rng_uniform.
             double u = rng_uniform(&rng);
             double prob = (T > 0.0) ? exp(-delta / T) : 0.0;
             if (u < prob)
-            {
                 accept = 1;
-            }
         }
 
         if (accept)
         {
             qap_apply_swap(&current, i, j, delta);
+
             if (current.cost < best.cost)
             {
                 sol_copy(&current, &best);
@@ -216,45 +196,35 @@ void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats)
             }
         }
 
-        // Cooling.
         T *= alpha;
-        // TODO: Choose bottom bound correct? 
         if (T < BOTTOM_TEMPERATURE_BOUND)
+            T = BOTTOM_TEMPERATURE_BOUND;
+
+        if (log && (it % 10 == 0))
         {
-            // Bottom bound to avoid zero-dividing.
-            T = BOTTOM_TEMPERATURE_BOUND; 
+            fprintf(log, "%zu %.10f %.10f %.10f\n",
+                    it, current.cost, best.cost, T);
         }
     }
 
-    // Finish time.
     clock_t end = clock();
 
     if (out_stats)
+        out_stats->final_cost = current.cost;
+
+    double elapsed_time =
+        (double)(end - start) / CLOCKS_PER_SEC;
+
+    if (log)
     {
-        out_stats->final_cost = current.cost;        
+        fprintf(log,
+                "\n# FINAL\n%.10f\n# BEST\n%.10f\n# TIME\n%f\n",
+                current.cost, best.cost, elapsed_time);
     }
 
-    double elapsed_time = (double)(end - start) / CLOCKS_PER_SEC;
-
-    // Resume data into benchmark log if it need.
-    if (benchmark_log)
-    {
-        fprintf(benchmark_log, "\n\nBest:        %f\nReal optima: %f\nElapsed:     %f\n\n", 
-                best.cost, 
-                cfg->real_optima,
-                elapsed_time);
-    }
-
-    // Print results.
     printf("FINAL: %.10f  BEST: %.10f  BEST_ITER: %zu\n",
-           current.cost, best.cost, (out_stats ? out_stats->best_iter : 0));
-    
-    printf("BEST permutation:\n");
-    for (int i = 0; i < best.n; i++)
-    {
-        printf("%lu ", best.permutations[i]);
-    }
-    printf("\n");
+           current.cost, best.cost,
+           (out_stats ? out_stats->best_iter : 0));
 
     printf("Elapsed time: %f\n", elapsed_time);
 

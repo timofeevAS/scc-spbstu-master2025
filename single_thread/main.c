@@ -1,9 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include "../common/qap.h"
 
-// Defined in sa_single.c
 typedef struct
 {
     double T0;
@@ -11,8 +11,7 @@ typedef struct
     size_t iters;
     unsigned long long seed;
     int random_start;
-    int benchmark;
-    double real_optima;
+    const char *log_path;
 } SAParams;
 
 typedef struct
@@ -22,35 +21,39 @@ typedef struct
     double final_cost;
 } SAStats;
 
-void sa_single_run(const QAPProblem *P, const SAParams *cfg, SAStats *out_stats);
+void sa_single_run(
+    const QAPProblem *P,
+    const SAParams *cfg,
+    SAStats *out_stats,
+    FILE *log);
 
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s --input <path> [--iters N] [--T0 X] [--alpha A] [--seed S] [--random] [--benchmark]\n"
-            "  --input      path to QAP instance (txt)\n"
-            "  --iters      number of SA iterations (default: 100000)\n"
-            "  --T0         initial temperature (default: 1e4)\n"
-            "  --alpha      cooling factor in (0,1) (default: 0.9995)\n"
-            "  --seed       RNG seed (default: 0 -> time-based)\n"
-            "  --random     start from a random permutation (default: identity)\n"
-            "  --benchmark  start in benchmark mode with log data in .log file.\n",
-            prog);
+        "Usage: %s --input <path> [options]\n"
+        "Options:\n"
+        "  --iters N     number of iterations\n"
+        "  --T0 X        start temperature\n"
+        "  --alpha A     cooling factor\n"
+        "  --seed S      RNG seed\n"
+        "  --random      random start permutation\n"
+        "  --log FILE    write log to FILE\n",
+        prog);
 }
 
 int main(int argc, char **argv)
 {
     const char *input = NULL;
+
     SAParams cfg = {
         .T0 = 1e4,
         .alpha = 0.9995,
         .iters = 100000,
         .seed = 0ULL,
         .random_start = 0,
-        .benchmark = 0,
-        .real_optima = 0};
+        .log_path = NULL
+    };
 
-    // argv parser.
     for (int i = 1; i < argc; i++)
     {
         if (!strcmp(argv[i], "--input") && i + 1 < argc)
@@ -77,9 +80,9 @@ int main(int argc, char **argv)
         {
             cfg.random_start = 1;
         }
-        else if (!strcmp(argv[i], "--benchmark"))
+        else if (!strcmp(argv[i], "--log") && i + 1 < argc)
         {
-            cfg.benchmark = 1;
+            cfg.log_path = argv[++i];
         }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
         {
@@ -108,27 +111,23 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (cfg.benchmark)
+    FILE *log = NULL;
+    if (cfg.log_path)
     {
-        char filename[256];
-        snprintf(filename, sizeof(filename), "%s.opt", input);
-
-        FILE *optima = fopen(filename, "r");
-
-        double value;
-        if (fscanf(optima, "%lf", &value) != 1)
+        log = fopen(cfg.log_path, "w");
+        if (!log)
         {
-            fprintf(stderr, "Cannot get real optima value from file\n");
-            fclose(optima);
-            return 1;
+            perror("fopen(log)");
+            qap_free(P);
+            return 3;
         }
-
-        cfg.real_optima = value;
     }
 
-    // Main running.
     SAStats st = {0};
-    sa_single_run(P, &cfg, &st);
+    sa_single_run(P, &cfg, &st, log);
+
+    if (log)
+        fclose(log);
 
     qap_free(P);
     return 0;
