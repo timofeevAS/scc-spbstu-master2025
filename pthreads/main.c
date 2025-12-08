@@ -8,7 +8,7 @@
 #include "sprng.h"   // SPRNG 2.0
 
 #define IDX(n,i,j) ((i) * (n) + (j))
-#define LOG_EVERY_ITER 100
+#define LOG_EVERY_ITER 1
 
 typedef struct
 {
