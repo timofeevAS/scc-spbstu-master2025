@@ -8,8 +8,6 @@
 #include "sprng.h"   // SPRNG 2.0
 
 #define IDX(n,i,j) ((i) * (n) + (j))
-#define SEED 12345
-
 #define LOG_EVERY_ITER 100
 
 typedef struct
@@ -141,8 +139,6 @@ void qap_apply_swap(QAPSolution *s, size_t i, size_t j, double delta)
     s->cost += delta;
 }
 
-// ==================== SOLUTION ====================
-
 QAPSolution *qap_solution_alloc(size_t n)
 {
     QAPSolution *s = malloc(sizeof(QAPSolution));
@@ -185,29 +181,6 @@ void qap_solution_random_init(const QAPProblem *p, QAPSolution *s, int *stream)
     s->cost = qap_eval(p, s);
 }
 
-// ==================== GLOBAL BEST ====================
-
-static QAPSolution *g_best = NULL;
-static pthread_mutex_t g_best_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-void update_global_best(const QAPSolution *cand)
-{
-    pthread_mutex_lock(&g_best_mutex);
-
-    if (!g_best)
-    {
-        g_best = qap_solution_alloc(cand->n);
-        qap_solution_copy(g_best, cand);
-        fprintf(stderr, "[GLOBAL] init best = %.10f\n", g_best->cost);
-    }
-    else if (cand->cost < g_best->cost)
-    {
-        qap_solution_copy(g_best, cand);
-        fprintf(stderr, "[GLOBAL] improved best = %.10f\n", g_best->cost);
-    }
-
-    pthread_mutex_unlock(&g_best_mutex);
-}
 
 // ==================== THREAD ARGS ====================
 
@@ -219,17 +192,15 @@ typedef struct
     int n_threads;
     double T0;
     double alpha;
-    long long restart_period;
-    int shake_moves;
 
-    // === LOGGING ===
     double *trace;
     double *timer;
     long long trace_len;
 
 } SAThreadArgs;
 
-// ==================== SA THREAD ====================
+
+// ==================== SA THREAD (NEW SINGLE-LIKE VERSION) ====================
 
 void *sa_thread_func(void *arg)
 {
@@ -246,13 +217,12 @@ void *sa_thread_func(void *arg)
     QAPSolution *cur  = qap_solution_alloc(n);
     QAPSolution *best = qap_solution_alloc(n);
 
+    // random start
     qap_solution_random_init(p, cur, stream);
     qap_solution_copy(best, cur);
-    update_global_best(best);
 
     double T = a->T0;
 
-    // ===== TIMER START =====
     struct timespec ts_start;
     clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
@@ -264,20 +234,13 @@ void *sa_thread_func(void *arg)
         if (i != j)
         {
             double d = qap_delta_swap(p, cur, i, j);
-
-            int accept = 0;
-            if (d < 0) accept = 1;
-            else if (sprng(stream) < exp(-d/T)) accept = 1;
+            int accept = (d < 0) || (sprng(stream) < exp(-d / T));
 
             if (accept)
             {
                 qap_apply_swap(cur, i, j, d);
-
                 if (cur->cost < best->cost)
-                {
                     qap_solution_copy(best, cur);
-                    update_global_best(best);
-                }
             }
         }
 
@@ -290,47 +253,24 @@ void *sa_thread_func(void *arg)
                 (ts_now.tv_sec  - ts_start.tv_sec) +
                 (ts_now.tv_nsec - ts_start.tv_nsec) / 1e9;
 
-            a->trace[a->trace_len] = cur->cost;
+            a->trace[a->trace_len] = best->cost;
             a->timer[a->trace_len] = elapsed;
             a->trace_len++;
         }
 
-        if (((iter % n)==0) && T>1e-8) 
-            T *= a->alpha;
-
-        if (a->restart_period>0 && iter>0 && (iter % a->restart_period)==0)
-        {
-            pthread_mutex_lock(&g_best_mutex);
-
-            if (g_best)
-            {
-                qap_solution_copy(cur, g_best);
-                qap_solution_copy(best, g_best);
-            }
-
-            pthread_mutex_unlock(&g_best_mutex);
-
-            for (int s = 0; s < a->shake_moves; s++)
-            {
-                size_t si = (size_t)(sprng(stream)*n);
-                size_t sj = (size_t)(sprng(stream)*n);
-                if (si == sj) continue;
-
-                double dd = qap_delta_swap(p, cur, si, sj);
-                qap_apply_swap(cur, si, sj, dd);
-            }
-
-            T = a->T0;
-        }
+        // --- IDENTICAL COOLING TO SINGLE SA ---
+        T *= a->alpha;
+        if (T < 1e-6) T = 1e-6;
     }
 
-    update_global_best(best);
+    qap_solution_copy(cur, best);
 
-    qap_solution_free(cur);
     qap_solution_free(best);
     free_sprng(stream);
-    return NULL;
+
+    return cur;      // return result pointer
 }
+
 
 // ==================== MAIN ====================
 
@@ -339,17 +279,15 @@ int main(int argc, char **argv)
     if (argc < 2)
     {
         fprintf(stderr,
-                "Usage: %s instance.dat [nthreads] [iters] [restart] [shake] [repeats]\n",
+                "Usage: %s instance.dat [nthreads] [iters] [repeats]\n",
                 argv[0]);
         return 1;
     }
 
-    const char *path         = (argc > 1 ? argv[1] : NULL);
-    int nthreads             = (argc > 2 ? atoi(argv[2]) : 4);
-    long long iters          = (argc > 3 ? atoll(argv[3]) : 100000);
-    long long restart_period = (argc > 4 ? atoll(argv[4]) : 20000);
-    int shake_moves          = (argc > 5 ? atoi(argv[5]) : 5);
-    int repeats              = (argc > 6 ? atoi(argv[6]) : 1);
+    const char *path   = argv[1];
+    int nthreads       = (argc > 2 ? atoi(argv[2]) : 4);
+    long long iters    = (argc > 3 ? atoll(argv[3]) : 100000);
+    int repeats        = (argc > 4 ? atoi(argv[4]) : 1);
 
     QAPProblem *p = qap_load_from_file(path);
     if (!p)
@@ -360,44 +298,30 @@ int main(int argc, char **argv)
 
     long long approx_logs = iters / LOG_EVERY_ITER + 10;
 
-    // === массивы для усреднения ===
     double *best_cost = malloc(approx_logs * sizeof(double));
     double *sum_time  = calloc(approx_logs, sizeof(double));
-
     for (long long i = 0; i < approx_logs; i++)
-        best_cost[i] = 1e300;  // очень большое число
+        best_cost[i] = 1e300;
 
     pthread_t *threads;
     SAThreadArgs *args;
 
-    // === ПОВТОРЫ R раз ===
     for (int r = 0; r < repeats; r++)
     {
-        fprintf(stderr, "\n=== REPEAT %d / %d ===\n", r + 1, repeats);
+        fprintf(stderr, "\n=== REPEAT %d / %d ===\n", r+1, repeats);
 
         threads = malloc(nthreads * sizeof(pthread_t));
         args    = malloc(nthreads * sizeof(SAThreadArgs));
 
-        // обнулить глобальный best между повторами
-        pthread_mutex_lock(&g_best_mutex);
-        if (g_best)
-        {
-            qap_solution_free(g_best);
-            g_best = NULL;
-        }
-        pthread_mutex_unlock(&g_best_mutex);
-
-        // запуск потоков
         for (int t = 0; t < nthreads; t++)
         {
-            args[t].problem        = p;
-            args[t].n_iters        = iters;
-            args[t].thread_id      = t;
-            args[t].n_threads      = nthreads;
-            args[t].T0             = 1000.0;
-            args[t].alpha          = 0.995;
-            args[t].restart_period = restart_period;
-            args[t].shake_moves    = shake_moves;
+            args[t].problem  = p;
+            args[t].n_iters  = iters;
+            args[t].thread_id = t;
+            args[t].n_threads = nthreads;
+
+            args[t].T0    = 1e4;
+            args[t].alpha = 0.9995;
 
             args[t].trace = malloc(approx_logs * sizeof(double));
             args[t].timer = malloc(approx_logs * sizeof(double));
@@ -406,20 +330,29 @@ int main(int argc, char **argv)
             pthread_create(&threads[t], NULL, sa_thread_func, &args[t]);
         }
 
-        // ждём окончания
-        for (int t = 0; t < nthreads; t++)
-            pthread_join(threads[t], NULL);
+        QAPSolution *best_final = NULL;
+        double best_value = 1e300;
 
-        // аккумуляция итогов текущего повтора
         for (int t = 0; t < nthreads; t++)
         {
+            QAPSolution *res;
+            pthread_join(threads[t], (void**)&res);
+
+            if (res->cost < best_value)
+            {
+                best_value = res->cost;
+                best_final = res;
+            }
+            else
+            {
+                qap_solution_free(res);
+            }
+
             for (long long i = 0; i < args[t].trace_len; i++)
             {
-                // берём МИНИМУМ стоимости (best-so-far)
                 if (args[t].trace[i] < best_cost[i])
                     best_cost[i] = args[t].trace[i];
 
-                // время усредняем
                 sum_time[i] += args[t].timer[i];
             }
 
@@ -427,41 +360,31 @@ int main(int argc, char **argv)
             free(args[t].timer);
         }
 
+        printf("BEST COST (repeat %d) = %.10f\n", r+1, best_final->cost);
+
+        qap_solution_free(best_final);
+
         free(threads);
         free(args);
     }
 
-    // === вычисление окончательного усреднённого времени ===
-    double total = (double)(repeats * nthreads);
-
     FILE *avg = fopen("average_trace.csv", "w");
     fprintf(avg, "time,best_cost\n");
+
+    double total = repeats * nthreads;
 
     for (long long i = 0; i < approx_logs; i++)
     {
         double avg_time = sum_time[i] / total;
         fprintf(avg, "%.6f,%.10f\n", avg_time, best_cost[i]);
     }
-
     fclose(avg);
 
     printf("Saved averaged trace to average_trace.csv\n");
 
-    // вывести лучший последний результат
-    if (g_best)
-    {
-        printf("Best cost = %.10f\n", g_best->cost);
-        printf("Permutation:\n");
-        for (size_t i = 0; i < g_best->n; i++)
-            printf("%zu ", g_best->permutations[i]);
-        printf("\n");
-    }
-
     free(best_cost);
     free(sum_time);
-
     qap_free(p);
-    if (g_best) qap_solution_free(g_best);
 
     return 0;
 }
